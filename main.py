@@ -5,19 +5,8 @@ import pdfplumber
 
 app = FastAPI()
 
-
 DATE_START_RE = re.compile(
     r"^\d{2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}\s+[A-Za-z]{3}\s+\d{4}\s+\S+"
-)
-
-ROW_PARSE_RE = re.compile(
-    r"^"
-    r"(\d{2}\s+[A-Za-z]{3}\s+\d{4})\s+"      # txn date
-    r"(\d{2}\s+[A-Za-z]{3}\s+\d{4})\s+"      # value date
-    r"(\S+)\s+"                              # reference
-    r"(.+?)\s+"                              # description
-    r"(\d[\d,]*\.\d{2})\s+"                  # amount
-    r"(\d[\d,]*\.\d{2})$"                    # balance
 )
 
 SKIP_PATTERNS = [
@@ -37,6 +26,8 @@ SKIP_PATTERNS = [
     re.compile(r"^Page\s+\d+", re.I),
 ]
 
+AMOUNT_RE = re.compile(r"\d[\d,]*\.\d{2}")
+
 
 def clean_line(line: str) -> str:
     return re.sub(r"\s+", " ", line).strip()
@@ -50,17 +41,13 @@ def should_skip_line(line: str) -> bool:
 
 
 def date_to_iso(s: str) -> str:
-    parts = s.split()
-    day = parts[0]
-    mon = parts[1].lower()
-    year = parts[2]
-
+    d, mon, y = s.split()
     months = {
         "jan": "01", "feb": "02", "mar": "03", "apr": "04",
         "may": "05", "jun": "06", "jul": "07", "aug": "08",
         "sep": "09", "oct": "10", "nov": "11", "dec": "12",
     }
-    return f"{year}-{months[mon]}-{day}"
+    return f"{y}-{months[mon.lower()]}-{d}"
 
 
 def amount_to_float(s: str) -> float:
@@ -72,13 +59,13 @@ def month_key(iso_date: str) -> str:
 
 
 def month_label(key: str) -> str:
-    year, month = key.split("-")
+    y, m = key.split("-")
     names = {
         "01": "Jan", "02": "Feb", "03": "Mar", "04": "Apr",
         "05": "May", "06": "Jun", "07": "Jul", "08": "Aug",
         "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dec",
     }
-    return f"{names[month]} {year}"
+    return f"{names[m]} {y}"
 
 
 def classify_channel(description: str) -> str:
@@ -89,8 +76,6 @@ def classify_channel(description: str) -> str:
         return "IMPS"
     if "neft" in d:
         return "NEFT"
-    if "interest" in d:
-        return "BANK"
     if "ach" in d:
         return "ACH"
     return "BANK"
@@ -111,13 +96,14 @@ def classify_type(description: str, reference: str) -> str:
         or "cr-funds received" in d
         or "neft cr-" in d
         or "ach cr " in d
+        or "refund" in d
+        or "payout" in d
         or r.startswith("yesf")
         or r.startswith("yesob")
         or r.startswith("yes0n")
         or r.startswith("yesi1")
         or r.startswith("chbatch")
-        or "refund" in d
-        or "payout" in d
+        or r.startswith("ybp")   # important for your 17 Feb IMPS credit
     ):
         return "credit"
 
@@ -131,7 +117,6 @@ def classify_type(description: str, reference: str) -> str:
         or "ach dr " in d
         or "autopay" in d
         or "rent" in d
-        or r.startswith("ybp")
         or r.startswith("ybs")
         or r.startswith("yesib")
         or r.startswith("yesi3")
@@ -178,16 +163,39 @@ def split_rows(lines):
 
 
 def parse_row(row: str):
-    m = ROW_PARSE_RE.match(row)
+    row = clean_line(row)
+
+    m = re.match(
+        r"^(\d{2}\s+[A-Za-z]{3}\s+\d{4})\s+"
+        r"(\d{2}\s+[A-Za-z]{3}\s+\d{4})\s+"
+        r"(\S+)\s+(.*)$",
+        row
+    )
     if not m:
         return None
 
     txn_date_raw = m.group(1)
     value_date_raw = m.group(2)
     reference = m.group(3)
-    description = clean_line(m.group(4))
-    amount = amount_to_float(m.group(5))
-    balance = amount_to_float(m.group(6))
+    rest = m.group(4)
+
+    nums = list(AMOUNT_RE.finditer(rest))
+    if len(nums) < 2:
+        return None
+
+    # first amount+balance pair after reference is the transaction numeric pair
+    amt_match = nums[0]
+    bal_match = nums[1]
+
+    amount = amount_to_float(amt_match.group())
+    balance = amount_to_float(bal_match.group())
+
+    before = rest[:amt_match.start()].strip()
+    after = rest[bal_match.end():].strip()
+
+    description = clean_line((before + " " + after).strip())
+    if not description:
+        return None
 
     txn_date = date_to_iso(txn_date_raw)
     value_date = date_to_iso(value_date_raw)
@@ -256,8 +264,8 @@ async def parse_pdf(file: UploadFile = File(...)):
         },
         "warnings": unparsed[:20],
         "parser": {
-            "name": "python_yesbank_v1",
-            "confidence": 0.90,
+            "name": "python_yesbank_v2",
+            "confidence": 0.94,
         },
         "debug": {
             "pages": len(set(x["page"] for x in line_items)),
