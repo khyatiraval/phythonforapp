@@ -196,7 +196,7 @@ def detect_category(description: str, txn_type: str, payment_mode: str) -> str:
     if contains_any(d, ["salary", "salaries", "sallary"]):
         return "salary"
 
-    if contains_any(d, ["interest capitalised","interest interest capitalised", "credit interest", "monthly interest credit", "quarterly interest credit", "interest"]):
+    if contains_any(d, ["interest capitalised","credit interest capitalised", "credit interest", "monthly interest credit", "quarterly interest credit", "interest"]):
         return "interest"
 
     if payment_mode == "UPI":
