@@ -1,34 +1,40 @@
 from fastapi import FastAPI, File, UploadFile
+import io
+import re
 import pdfplumber
 
 app = FastAPI()
+
 
 @app.get("/")
 def home():
     return {"status": "API running"}
 
+
 @app.post("/parse")
 async def parse_pdf(file: UploadFile = File(...)):
     content = await file.read()
 
-    transactions = []
+    all_text = []
+    lines = []
 
-    with pdfplumber.open(file.file) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
+    with pdfplumber.open(io.BytesIO(content)) as pdf:
+        for page_no, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text() or ""
+            all_text.append(text)
 
-            if not text:
-                continue
-
-            lines = text.split("\n")
-
-            for line in lines:
-                if "UPI" in line or "IMPS" in line:
-                    transactions.append({
-                        "raw": line
+            for line in text.split("\n"):
+                line = re.sub(r"\s+", " ", line).strip()
+                if line:
+                    lines.append({
+                        "page": page_no,
+                        "line": line
                     })
 
     return {
         "success": True,
-        "transactions": transactions
+        "pages": len(all_text),
+        "lineCount": len(lines),
+        "lines": lines[:400],
+        "fullTextPreview": "\n".join(all_text)[:12000]
     }
